@@ -116,6 +116,12 @@ internal fun CompletedResult(
                 tabs.forEach { tab -> Tab(selected = selectedTab == tab, onClick = { onSelectTab(tab) }, text = { Text(tab, style = MaterialTheme.typography.titleMedium) }) }
             }
             if (selectedTab == "Check") {
+                val summary = job.optJSONObject("summary")
+                val noClaims = summary?.optJSONArray("important_claims")?.length() == 0
+                if (report == null && noClaims) {
+                    Text("No factual claims to check were identified in this video.", style = MaterialTheme.typography.bodyLarge)
+                    Text("You can read the summary or ask a question below.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
                 if (report == null) Text("Compare claims with external sources.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (report == null) Button(shape = MaterialTheme.shapes.small, enabled = !checking, onClick = {
                     checking = true
@@ -128,6 +134,7 @@ internal fun CompletedResult(
                 }) { Text(if (checking) "Checking claims…" else "Check claims") }
                 if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
                 report?.let { FactCheckContent(it) { claim -> claimContext = claim } } ?: Text("Not independently checked.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             } else {
                 val summary = job.optJSONObject("summary") ?: JSONObject()
                 // Old saved analyses remain readable without generating another summary.

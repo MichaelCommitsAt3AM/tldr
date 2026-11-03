@@ -70,8 +70,12 @@ class LLM:
                   "important_claims and language. short_summary is the ONLY summary: two or three concise "
                   "sentences, at most 80 words and 1500 characters. Do not produce a longer summary, "
                   "key points or notes. important_claims is an array of up to three specific, independently "
-                  "checkable claims from the transcript, retained only for the separate fact-check tool; "
-                  "use an empty array if there are none. language is the transcript's language code.")
+                  "checkable factual claims central to the transcript, retained only for the optional "
+                  "fact-check tool. Do not manufacture claims to fill this array. Opinions, preferences, "
+                  "jokes, fiction, personal anecdotes, instructions and advice alone are not claims to "
+                  "fact-check; include them only if they contain a specific externally verifiable factual "
+                  "assertion worth checking. Use an empty array when no such claims exist. "
+                  "A useful summary does not require any checkable claims. language is the transcript's language code.")
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": json.dumps({"transcript": transcript}, ensure_ascii=False)}]
         for attempt in range(2):

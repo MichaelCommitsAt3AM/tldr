@@ -58,7 +58,9 @@ internal fun FactCheckContent(report: JSONObject, onAskClaim: (String) -> Unit) 
     Text(listOfNotNull("${claims.size} claim${if (claims.size == 1) "" else "s"} checked", checkedLabel.takeIf { it.isNotBlank() }).joinToString(" · "),
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     SelectionContainer {
-        Text(if (claims.isEmpty()) "No independently checkable claims were identified." else checkOverview(claims),
+        Text(report.string("overview").ifBlank {
+            if (claims.isEmpty()) "No independently checkable claims were identified." else checkOverview(claims)
+        },
             style = MaterialTheme.typography.bodyLarge)
     }
     if (claims.isNotEmpty()) OutlinedButton(onClick = { showDetails = true }, shape = MaterialTheme.shapes.small) { Text("View details") }

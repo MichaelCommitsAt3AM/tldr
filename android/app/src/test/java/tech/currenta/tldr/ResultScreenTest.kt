@@ -18,10 +18,11 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], qualifiers = "w360dp-h640dp")
 class ResultScreenTest {
     @get:Rule val compose = createComposeRule()
-    private fun mount(report: JSONObject? = null, onQuestion: suspend (String, JSONArray, String?) -> String = { _, _, _ -> "An answer." }) {
+    private fun mount(report: JSONObject? = null, noClaims: Boolean = false, onQuestion: suspend (String, JSONArray, String?) -> String = { _, _, _ -> "An answer." }) {
         val selected = mutableStateOf("Summary")
         val job = JSONObject("""{"id":"job","status":"completed","url":"https://youtu.be/test","summary":{"title":"Test video","short_summary":"The quick summary.","summary":"Legacy long text.","key_points":["Legacy key point"]}}""")
         if (report != null) job.put("fact_check", report)
+        if (noClaims) job.getJSONObject("summary").put("important_claims", JSONArray())
         compose.setContent { UtilityTheme("Dark") {
             CompletedResult(job, selected.value, { selected.value = it }, onQuestion,
                 onCheck = { JSONObject("""{"note":"No checkable claims.","claims":[]}""") },
@@ -74,6 +75,25 @@ class ResultScreenTest {
     }
 
     private fun claimReport() = JSONObject("""{"note":"Consult original sources for full context.","claims":[{"claim":"A specific claim that needs context.","verdict":"Misleading / missing context","explanation":"This claim leaves out an important qualification.","sources":[{"title":"Research paper","url":"https://example.org/research","excerpt":"<strong>Evidence</strong> text"}]}]}""")
+
+    @Test fun serverOverviewKeepsFullExplanationsBehindDetails() {
+        mount(report = claimReport().put("overview", "The claim omits important context."))
+        compose.onNodeWithText("Check").performClick()
+        compose.onNodeWithText("The claim omits important context.").assertIsDisplayed()
+        compose.onNodeWithText("This claim leaves out an important qualification.", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("View details").performScrollTo().performClick()
+        compose.onNodeWithText("A specific claim that needs context.").assertIsDisplayed().performSemanticsAction(SemanticsActions.OnClick) { it() }
+        compose.onNodeWithText("This claim leaves out an important qualification.").assertIsDisplayed()
+    }
+
+    @Test fun videosWithoutFactualClaimsStillHaveASummaryAndQuestions() {
+        mount(noClaims = true)
+        compose.onNodeWithText("The quick summary.").assertIsDisplayed()
+        compose.onNodeWithText("Check").performClick()
+        compose.onNodeWithText("No factual claims to check were identified in this video.").assertIsDisplayed()
+        compose.onNodeWithText("Check claims").assertDoesNotExist()
+        compose.onNodeWithText("Ask about this video").assertIsDisplayed()
+    }
 
     @Test fun checkOverviewOpensDetailsWithProgressiveSourceExcerpts() {
         mount(report = claimReport())

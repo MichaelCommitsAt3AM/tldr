@@ -238,6 +238,11 @@ class OverlayService : Service() {
         if (checking) { add(container, label("Checking claims. You can minimize this popup.", 12f, true)); progress(container); return }
         val fact = report
         if (fact == null) {
+            if (job?.optJSONObject("summary")?.optJSONArray("important_claims")?.length() == 0) {
+                add(container, label("No factual claims to check were identified in this video."))
+                add(container, action("Open summary") { openFull("Summary") })
+                return
+            }
             add(container, label("Compare claims with external sources.", 12f, true))
             add(container, action("Check claims", true) { checkClaims() })
             add(container, label("Not independently checked.", 12f, true)); return
