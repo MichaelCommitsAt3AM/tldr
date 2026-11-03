@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+*.db
+*.sqlite3
+build/
+.gradle/
+local.properties
+.kotlin/
+tmp/
+.env.*
+!.env.example
+*.jks
+*.keystore
