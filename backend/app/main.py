@@ -1,10 +1,5 @@
-import hashlib
-import hmac
 import json
-import os
 import re
-import secrets
-import shutil
 import threading
 import time
 import uuid
@@ -12,27 +7,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 from . import db
+from .auth import require_auth, router as auth_router
 from .llm import LLM, ProviderError
 from .search import fact_check
 from .video_urls import validate_url
 from .worker import MAX_BYTES, start_worker
-
-TOKEN_FILE = Path(db.DATA) / "device-token.sha256"
-
-
-def require_auth(authorization: str = Header(default="")):
-    if not TOKEN_FILE.exists():
-        raise HTTPException(503, "Device access has not been configured on the server")
-    token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    if not token or not hmac.compare_digest(digest, TOKEN_FILE.read_text().strip()):
-        raise HTTPException(401, "Invalid device credential")
-
 
 @asynccontextmanager
 async def lifespan(app):
@@ -94,6 +77,7 @@ class RequestGuard:
 
 
 app.add_middleware(RequestGuard)
+app.include_router(auth_router)
 
 
 class Analyze(BaseModel):
@@ -119,32 +103,6 @@ class Question(BaseModel):
         return value.strip()
 
 
-class PairCode(BaseModel):
-    code: str = Field(pattern=r"^[0-9]{9}$")
-
-
-@app.post("/api/v1/pair")
-def pair(request: PairCode):
-    digest = hashlib.sha256(request.code.encode()).hexdigest()
-    with db.connection() as c:
-        c.execute("BEGIN IMMEDIATE")
-        row = c.execute("SELECT code_hash, expires_at, attempts FROM pairing WHERE id=1").fetchone()
-        if not row or row["expires_at"] < time.time() or row["attempts"] >= 5:
-            raise HTTPException(403, "Pairing code is invalid or expired. Generate a new one on the server.")
-        if not hmac.compare_digest(digest, row["code_hash"]):
-            c.execute("UPDATE pairing SET attempts=attempts+1 WHERE id=1")
-            c.commit()
-            raise HTTPException(403, "Pairing code is invalid or expired. Generate a new one on the server.")
-        token = secrets.token_urlsafe(32)
-        temporary = TOKEN_FILE.with_name("device-token.new")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(hashlib.sha256(token.encode()).hexdigest())
-        os.replace(temporary, TOKEN_FILE)
-        c.execute("DELETE FROM pairing WHERE id=1")
-    return {"token": token}
-
-
 @app.get("/api/v1/health")
 def health():
     return {"status": "ok"}
@@ -155,8 +113,8 @@ def schema():
     return app.openapi()
 
 
-@app.post("/api/v1/jobs", dependencies=[Depends(require_auth)])
-def submit(request: Analyze):
+@app.post("/api/v1/jobs")
+def submit(request: Analyze, owner_id: str = Depends(require_auth)):
     if (request.url is None) == (request.input is None):
         raise HTTPException(422, "Enter a link or paste text to summarize")
     if request.input is not None:
@@ -169,11 +127,11 @@ def submit(request: Analyze):
             job_id = str(uuid.uuid4())
             with db.connection() as c:
                 c.execute(
-                    "INSERT INTO jobs(id,status,metadata,transcript) VALUES(?,'queued',?,?)",
-                    (job_id, json.dumps({"platform": "text", "title": "Pasted text"}),
+                    "INSERT INTO jobs(id,owner_id,status,metadata,transcript) VALUES(?,?,'queued',?,?)",
+                    (job_id, owner_id, json.dumps({"platform": "text", "title": "Pasted text"}),
                      json.dumps({"text": content, "segments": []}, ensure_ascii=False)),
                 )
-            return db.get(job_id)
+            return db.get(job_id, owner_id)
         if content.lower().startswith("www."):
             content = "https://" + content
     else:
@@ -183,16 +141,16 @@ def submit(request: Analyze):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     with db.connection() as c:
-        old = c.execute("SELECT id FROM jobs WHERE url=? AND status IN ('queued','fetching_metadata','downloading','extracting_audio','transcribing','summarizing','completed') ORDER BY created_at DESC LIMIT 1", (url,)).fetchone()
+        old = c.execute("SELECT id FROM jobs WHERE owner_id=? AND url=? AND status IN ('queued','fetching_metadata','downloading','extracting_audio','transcribing','summarizing','completed') ORDER BY created_at DESC LIMIT 1", (owner_id, url,)).fetchone()
         if old:
-            return db.get(old["id"])
+            return db.get(old["id"], owner_id)
         job_id = str(uuid.uuid4())
-        c.execute("INSERT INTO jobs(id,url,status) VALUES(?,?,'queued')", (job_id, url))
-    return db.get(job_id)
+        c.execute("INSERT INTO jobs(id,owner_id,url,status) VALUES(?,?,?,'queued')", (job_id, owner_id, url))
+    return db.get(job_id, owner_id)
 
 
-@app.post("/api/v1/uploads", dependencies=[Depends(require_auth)])
-async def upload(file: UploadFile = File(...)):
+@app.post("/api/v1/uploads")
+async def upload(file: UploadFile = File(...), owner_id: str = Depends(require_auth)):
     job_id = str(uuid.uuid4())
     directory = Path(db.DATA) / "uploads"
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -208,58 +166,58 @@ async def upload(file: UploadFile = File(...)):
         if not total:
             raise HTTPException(422, "The file is empty")
         with db.connection() as c:
-            c.execute("INSERT INTO jobs(id,upload_path,status) VALUES(?,?,'queued')", (job_id, str(path)))
+            c.execute("INSERT INTO jobs(id,owner_id,upload_path,status) VALUES(?,?,?,'queued')", (job_id, owner_id, str(path)))
     except BaseException:
         path.unlink(missing_ok=True)
         raise
     finally:
         await file.close()
-    return db.get(job_id)
+    return db.get(job_id, owner_id)
 
 
-@app.get("/api/v1/jobs", dependencies=[Depends(require_auth)])
-def history():
+@app.get("/api/v1/jobs")
+def history(owner_id: str = Depends(require_auth)):
     with db.connection() as c:
-        ids = [row["id"] for row in c.execute("SELECT id FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT 100")]
-    return [db.get(i) for i in ids]
+        ids = [row["id"] for row in c.execute("SELECT id FROM jobs WHERE owner_id=? ORDER BY created_at DESC, rowid DESC LIMIT 100", (owner_id,))]
+    return [db.get(i, owner_id) for i in ids]
 
 
-@app.delete("/api/v1/jobs", dependencies=[Depends(require_auth)])
-def clear_history():
+@app.delete("/api/v1/jobs")
+def clear_history(owner_id: str = Depends(require_auth)):
     with db.connection() as c:
-        rows = c.execute("SELECT upload_path FROM jobs WHERE status IN ('completed','failed','cancelled')").fetchall()
-        c.execute("DELETE FROM jobs WHERE status IN ('completed','failed','cancelled')")
+        rows = c.execute("""DELETE FROM jobs WHERE owner_id=? AND status IN ('completed','failed','cancelled')
+                            RETURNING upload_path""", (owner_id,)).fetchall()
     for row in rows:
         if row["upload_path"]:
             Path(row["upload_path"]).unlink(missing_ok=True)
     return {"deleted": len(rows), "note": "Active analyses were kept."}
 
 
-def get_job(job_id):
-    result = db.get(job_id)
+def get_job(job_id, owner_id):
+    result = db.get(job_id, owner_id)
     if not result:
         raise HTTPException(404, "Analysis not found")
     return result
 
 
-@app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(require_auth)])
-def job(job_id: str):
-    return get_job(job_id)
+@app.get("/api/v1/jobs/{job_id}")
+def job(job_id: str, owner_id: str = Depends(require_auth)):
+    return get_job(job_id, owner_id)
 
 
-@app.post("/api/v1/jobs/{job_id}/cancel", dependencies=[Depends(require_auth)])
-def cancel(job_id: str):
-    get_job(job_id)
+@app.post("/api/v1/jobs/{job_id}/cancel")
+def cancel(job_id: str, owner_id: str = Depends(require_auth)):
+    get_job(job_id, owner_id)
     with db.connection() as c:
         c.execute("UPDATE jobs SET cancel_requested=1, status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('completed','failed','cancelled')", (job_id,))
-    return get_job(job_id)
+    return get_job(job_id, owner_id)
 
 
-@app.post("/api/v1/jobs/{job_id}/retry", dependencies=[Depends(require_auth)])
-def retry(job_id: str):
+@app.post("/api/v1/jobs/{job_id}/retry")
+def retry(job_id: str, owner_id: str = Depends(require_auth)):
     with db.connection() as c:
         c.execute("BEGIN IMMEDIATE")
-        row = c.execute("SELECT status, url, metadata, transcript FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = c.execute("SELECT status, url, metadata, transcript FROM jobs WHERE id=? AND owner_id=?", (job_id, owner_id)).fetchone()
         if not row:
             raise HTTPException(404, "Analysis not found")
         if row["url"]:
@@ -270,45 +228,47 @@ def retry(job_id: str):
         if row["status"] == "completed":
             if not row["url"] and json.loads(row["metadata"] or "{}").get("platform") == "text":
                 job_id = str(uuid.uuid4())
-                c.execute("INSERT INTO jobs(id,status,metadata,transcript) VALUES(?,'queued',?,?)",
-                          (job_id, row["metadata"], row["transcript"]))
+                c.execute("INSERT INTO jobs(id,owner_id,status,metadata,transcript) VALUES(?,?,'queued',?,?)",
+                          (job_id, owner_id, row["metadata"], row["transcript"]))
             elif not row["url"]:
                 raise HTTPException(409, "Select the original media file again to retry this upload")
             else:
                 active = c.execute(
-                    """SELECT id FROM jobs WHERE url=? AND cancel_requested=0
+                    """SELECT id FROM jobs WHERE owner_id=? AND url=? AND cancel_requested=0
                        AND status NOT IN ('completed','failed','cancelled')
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-                    (row["url"],),
+                    (owner_id, row["url"]),
                 ).fetchone()
                 if active:
                     job_id = active["id"]
                 else:
                     job_id = str(uuid.uuid4())
-                    c.execute("INSERT INTO jobs(id,url,status) VALUES(?,?,'queued')", (job_id, row["url"]))
+                    c.execute("INSERT INTO jobs(id,owner_id,url,status) VALUES(?,?,?,'queued')", (job_id, owner_id, row["url"]))
         elif row["status"] in ("failed", "cancelled"):
             c.execute("UPDATE jobs SET status='queued', cancel_requested=0, error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
         else:
             raise HTTPException(409, "This analysis is already processing")
-    return get_job(job_id)
+    return get_job(job_id, owner_id)
 
 
-@app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(require_auth)])
-def delete(job_id: str):
-    result = get_job(job_id)
-    if result["status"] not in ("completed", "failed", "cancelled"):
-        raise HTTPException(409, "Cancel the analysis and wait for it to stop before deleting it")
+@app.delete("/api/v1/jobs/{job_id}")
+def delete(job_id: str, owner_id: str = Depends(require_auth)):
     with db.connection() as c:
-        row = c.execute("SELECT upload_path FROM jobs WHERE id=?", (job_id,)).fetchone()
-        c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT status, upload_path FROM jobs WHERE id=? AND owner_id=?", (job_id, owner_id)).fetchone()
+        if not row:
+            raise HTTPException(404, "Analysis not found")
+        if row["status"] not in ("completed", "failed", "cancelled"):
+            raise HTTPException(409, "Cancel the analysis and wait for it to stop before deleting it")
+        c.execute("DELETE FROM jobs WHERE id=? AND owner_id=?", (job_id, owner_id))
     if row and row["upload_path"]:
         Path(row["upload_path"]).unlink(missing_ok=True)
     return {"deleted": True}
 
 
-@app.post("/api/v1/jobs/{job_id}/fact-check", dependencies=[Depends(require_auth)])
-def check(job_id: str):
-    result = get_job(job_id)
+@app.post("/api/v1/jobs/{job_id}/fact-check")
+def check(job_id: str, owner_id: str = Depends(require_auth)):
+    result = get_job(job_id, owner_id)
     if result["status"] != "completed":
         raise HTTPException(409, "Analysis is not complete")
     if result["fact_check"] and time.time() - result["fact_check"].get("checked_at", 0) < 86400:
@@ -321,9 +281,9 @@ def check(job_id: str):
     return report
 
 
-@app.post("/api/v1/jobs/{job_id}/question", dependencies=[Depends(require_auth)])
-def question(job_id: str, request: Question):
-    result = get_job(job_id)
+@app.post("/api/v1/jobs/{job_id}/question")
+def question(job_id: str, request: Question, owner_id: str = Depends(require_auth)):
+    result = get_job(job_id, owner_id)
     if result["status"] != "completed":
         raise HTTPException(409, "Analysis is not complete")
     messages = [{"role": "system", "content": (

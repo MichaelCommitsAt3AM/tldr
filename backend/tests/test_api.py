@@ -1,11 +1,13 @@
+import base64
 import hashlib
+import re
 import json
 import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from app import db, main
+from app import auth, db, main
+from fastapi import HTTPException
 from app.safe_proxy import public_ip
 
 
@@ -13,8 +15,11 @@ from app.safe_proxy import public_ip
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB", str(tmp_path / "test.sqlite3"))
     monkeypatch.setattr(db, "DATA", str(tmp_path))
-    monkeypatch.setattr(main, "TOKEN_FILE", tmp_path / "token")
-    main.TOKEN_FILE.write_text(hashlib.sha256(b"test-secret").hexdigest())
+    def verify(token):
+        if token not in ("test-secret", "other-user"):
+            raise HTTPException(401, "Invalid session")
+        return {"sub": token, "email": token + "@example.com", "exp": int(time.time()) + 300}
+    monkeypatch.setattr(auth, "verify", verify)
     monkeypatch.setattr(main, "start_worker", lambda: type("Stop", (), {"set": lambda self: None})())
     with TestClient(main.app) as test:
         yield test
@@ -45,7 +50,7 @@ def test_submit_input_preserves_prose_and_rejects_unsupported_links(client):
     assert link.status_code == 422
 
     with db.connection() as c:
-        c.execute("INSERT INTO jobs(id,url,status) VALUES('old-post','https://www.reddit.com/comments/abc123/','failed')")
+        c.execute("INSERT INTO jobs(id,url,status,owner_id) VALUES('old-post','https://www.reddit.com/comments/abc123/','failed','test-secret')")
     assert client.post("/api/v1/jobs/old-post/retry", headers=headers).status_code == 422
     assert db.get("old-post")["status"] == "failed"
 
@@ -95,17 +100,40 @@ def test_upload_size_limit_and_delete(client, monkeypatch):
     assert client.delete(f"/api/v1/jobs/{job['id']}", headers=headers).status_code == 200
 
 
-def test_pairing_is_single_use_and_rotates_token(client):
-    code = "123456789"
+def test_browser_code_requires_correct_verifier_and_is_single_use(client):
+    verifier = "a" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    query = {"challenge": challenge}
+    assert client.get("/api/v1/auth/browser", params=query).status_code == 401
+    response = client.get("/api/v1/auth/browser", params=query, headers={"Cf-Access-Jwt-Assertion": "test-secret"})
+    code = re.search(r"code=([a-zA-Z0-9_-]+)", response.text)[1]
+    exchange = "/api/v1/auth/exchange"
+    assert client.post(exchange, json={"code": code, "verifier": "b" * 43}).status_code == 401
+    assert client.post(exchange, json={"code": code, "verifier": verifier}).json() == {"access_token": "test-secret"}
+    assert client.post(exchange, json={"code": code, "verifier": verifier}).status_code == 401
     with db.connection() as c:
-        c.execute("INSERT INTO pairing(id,code_hash,expires_at) VALUES(1,?,?)", (hashlib.sha256(code.encode()).hexdigest(), time.time() + 300))
-    assert client.post("/api/v1/pair", json={"code": "000000000"}).status_code == 403
-    response = client.post("/api/v1/pair", json={"code": code})
-    assert response.status_code == 200
-    token = response.json()["token"]
-    assert client.get("/api/v1/jobs", headers={"Authorization": "Bearer " + token}).status_code == 200
-    assert client.get("/api/v1/jobs", headers={"Authorization": "Bearer test-secret"}).status_code == 401
-    assert client.post("/api/v1/pair", json={"code": code}).status_code == 403
+        assert c.execute("SELECT email FROM accounts WHERE id='test-secret'").fetchone()["email"] == "test-secret@example.com"
+
+
+def test_libraries_are_private_and_legacy_history_is_unclaimed(client):
+    first = {"Authorization": "Bearer test-secret"}
+    second = {"Authorization": "Bearer other-user"}
+    payload = {"url": "https://youtu.be/example"}
+    job = client.post("/api/v1/jobs", json=payload, headers=first).json()
+    other = client.post("/api/v1/jobs", json=payload, headers=second).json()
+    assert job["id"] != other["id"]
+    with db.connection() as c:
+        c.execute("INSERT INTO jobs(id,status) VALUES('legacy','completed')")
+    assert [item["id"] for item in client.get("/api/v1/jobs", headers=second).json()] == [other["id"]]
+    path = f"/api/v1/jobs/{job['id']}"
+    for suffix in ("cancel", "retry", "fact-check"):
+        assert client.post(f"{path}/{suffix}", headers=second).status_code == 404
+    assert client.post(f"{path}/question", headers=second, json={"question": "What happened?"}).status_code == 404
+    assert client.delete(path, headers=second).status_code == 404
+    assert client.get("/api/v1/jobs/legacy", headers=first).status_code == 404
+    db.update(job["id"], status="completed")
+    assert client.delete("/api/v1/jobs", headers=second).status_code == 200
+    assert client.get(path, headers=first).status_code == 200
 
 
 def completed_job(client):

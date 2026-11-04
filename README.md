@@ -1,6 +1,6 @@
 # TL;DR
 
-Watch less. Know more. Android client and a single-user FastAPI service for transcript-grounded video summaries.
+Watch less. Know more. Android client and a FastAPI service for transcript-grounded video summaries.
 
 ## Design
 
@@ -18,11 +18,19 @@ The deployment uses two containers: the FastAPI worker on a dedicated internal n
 
 1. On the Ubuntu server, edit `~/tldr/deployment/.env` and set `LLM_API_KEY` and `BRAVE_SEARCH_API_KEY`. Keep this file private (`chmod 600`). Never enter these keys in Android.
 2. From `~/tldr`, run `docker compose -f deployment/compose.yml up -d --build`.
-3. Generate a one-time code with `docker compose -f deployment/compose.yml exec api python -m app.pair_device`. Enter the nine-digit code in TLDR Settings within five minutes. Pairing replaces the previous device credential, and five failed attempts invalidate the code. The credential itself is generated and stored automatically. To revoke access, pair a new device or run `docker compose -f deployment/compose.yml exec api python -m app.create_token` and keep the generated value private.
-4. In your Cloudflare tunnel configuration, add the hostname `tldr.currenta.tech` pointing to `http://localhost:18766` on this server. Preserve existing routes. Configure DNS and verify `https://tldr.currenta.tech/api/v1/health` responds over HTTPS. The tunnel configuration is account-managed, so it is not modified by the Compose project.
-5. In the app's Settings, use `https://tldr.currenta.tech` and the pairing code, then use Test connection. OpenCode's documentation says DeepSeek V4.1 Flash requires enabling the Global region in workspace privacy settings. The user confirmed permission for TLDR's use of OpenCode Go; check current provider terms and availability.
+3. In your Cloudflare tunnel, route `tldr.currenta.tech` to `http://localhost:18766`. Verify `https://tldr.currenta.tech/api/v1/health` responds over HTTPS.
+4. In Cloudflare Zero Trust, create a self-hosted Access application covering only `tldr.currenta.tech/api/v1/auth/browser`. Add an Allow policy for the individual emails you want to invite, and select email One-time PIN or your preferred identity provider. Leave the other API paths reachable so the Android client can exchange its sign-in code and send its bearer token.
+5. Set `CF_ACCESS_TEAM_DOMAIN` (the hostname ending in `.cloudflareaccess.com`, without a scheme) and `CF_ACCESS_AUD` (the Access application's Audience tag) in `deployment/.env`, then recreate the API with Compose. TLDR checks the Access token's signature, issuer, audience and expiration on each protected API request.
+6. Open the app, choose **Sign in with Cloudflare**, and tap **Return to TLDR** after completing the browser sign-in. The app uses `https://tldr.currenta.tech` automatically. Cloudflare Access policies control invitations, and each account has its own library.
 
-The first transcription downloads the selected `base` multilingual model to the persistent data volume. It may take longer than subsequent runs. Model/provider keys, tunnel credentials and device credentials must not be committed or shared. `docker compose ... logs` may contain generic error traces but does not intentionally log API keys or transcripts.
+To assign the original single-device history, sign in on the new app first. Then run the following commands and use the user ID corresponding to your verified email. Unassigned history is kept on disk and is private until you explicitly assign it.
+
+```sh
+docker compose -f deployment/compose.yml exec api python -m app.accounts list
+docker compose -f deployment/compose.yml exec api python -m app.accounts claim-history USER_ID
+```
+
+The first transcription downloads the English `base.en` model to the persistent data volume. It may take longer than subsequent runs. Keep provider keys and tunnel credentials private.
 
 Useful commands from `~/tldr`:
 
@@ -37,7 +45,7 @@ The last command stops only TLDR's containers and preserves the named data volum
 
 ## Android
 
-The debug APK is at `android/app/build/outputs/apk/debug/app-debug.apk`. Install with `adb install -r android/app/build/outputs/apk/debug/app-debug.apk` or transfer it to the phone and allow installation from the selected source. The device credential is encrypted with Android Keystore; the app requires HTTPS. If the phone's DNS cannot resolve the backend hostname, TLDR sends that hostname to Cloudflare's encrypted DNS service as a fallback. Use Android's share sheet to send text containing a supported URL to TLDR, or choose a media file from Home. The overlay needs explicit permission in Settings; return to Settings and tap Enable again after granting it. Use **Add to Quick Settings** in the app or add TLDR from Android's Quick Settings editor to toggle the bubble from the control panel. Drag the bubble to the bottom X to hide it; this does not cancel a server job. It cannot automatically read links from other apps.
+The debug APK is at `android/app/build/outputs/apk/debug/app-debug.apk`. Install with `adb install -r android/app/build/outputs/apk/debug/app-debug.apk` or transfer it to the phone and allow installation from the selected source. The Cloudflare session token is encrypted with Android Keystore; the app requires HTTPS. If the phone's DNS cannot resolve the backend hostname, TLDR sends that hostname to Cloudflare's encrypted DNS service as a fallback. Use Android's share sheet to send text containing a supported URL to TLDR, or choose a media file from Home. The overlay needs explicit permission in Settings; return to Settings and tap Enable again after granting it. Use **Add to Quick Settings** in the app or add TLDR from Android's Quick Settings editor to toggle the bubble from the control panel. Drag the bubble to the bottom X to hide it; this does not cancel a server job. It cannot automatically read links from other apps.
 
 Build with Android Studio or the Gradle wrapper and JDK 17+:
 
@@ -49,6 +57,8 @@ cd android
 ## Tests
 
 Create a Python environment, install `backend/requirements.txt`, and run `cd backend && python -m pytest`. The automated tests mock external services and Whisper inference; they do not establish real integration availability or summary quality. No timing guarantee follows from the prior Whisper benchmark.
+
+See [Transcription benchmarks](BENCHMARKS.md) for measured CPU, Vulkan, Moonshine, and audio download performance.
 
 ## Limits
 

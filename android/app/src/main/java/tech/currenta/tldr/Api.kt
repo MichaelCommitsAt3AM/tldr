@@ -30,9 +30,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 class Settings(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-    var base: String
-        get() = prefs.getString("base", "https://tldr.currenta.tech")!!
-        set(value) { require(value.startsWith("https://")); prefs.edit().putString("base", value.trimEnd('/')).apply() }
+    val base = "https://tldr.currenta.tech"
     var theme: String
         get() = prefs.getString("theme", "System")!!
         set(value) { prefs.edit().putString("theme", value).apply() }
@@ -47,16 +45,20 @@ class Settings(private val context: Context) {
     }
     var token: String
         get() = try {
-            val bytes = Base64.decode(prefs.getString("secret", ""), Base64.DEFAULT)
+            val bytes = Base64.decode(prefs.getString("access_session", ""), Base64.DEFAULT)
             if (bytes.size < 13) "" else Cipher.getInstance("AES/GCM/NoPadding").run {
                 init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
                 String(doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
             }
         } catch (_: Exception) { "" }
         set(value) {
+            if (value.isEmpty()) {
+                prefs.edit().remove("access_session").remove("secret").apply()
+                return
+            }
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key())
-            prefs.edit().putString("secret", Base64.encodeToString(cipher.iv + cipher.doFinal(value.toByteArray()), Base64.NO_WRAP)).apply()
+            prefs.edit().remove("secret").putString("access_session", Base64.encodeToString(cipher.iv + cipher.doFinal(value.toByteArray()), Base64.NO_WRAP)).apply()
         }
 }
 
@@ -85,31 +87,37 @@ class Api(private val context: Context) {
         }
         }
     }
-    private val client = OkHttpClient.Builder().dns(fallbackDns).connectTimeout(15, TimeUnit.SECONDS).readTimeout(150, TimeUnit.SECONDS).build()
+    private val client = OkHttpClient.Builder().dns(fallbackDns).followRedirects(false).connectTimeout(15, TimeUnit.SECONDS).readTimeout(150, TimeUnit.SECONDS).build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     suspend fun call(path: String, method: String = "GET", body: JSONObject? = null): String = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(settings.base + "/api/v1" + path).header("Authorization", "Bearer ${settings.token}")
+        val token = if (path == "/auth/exchange") "" else settings.token
+        val request = Request.Builder().url(settings.base + "/api/v1" + path)
+        if (token.isNotEmpty()) request.header("Authorization", "Bearer $token")
         when (method) {
             "POST" -> request.post((body ?: JSONObject()).toString().toRequestBody(jsonType))
             "DELETE" -> request.delete()
         }
-        client.newCall(request.build()).execute().use { response ->
+        execute(request.build(), token)
+    }
+    private fun execute(request: Request, token: String): String =
+        client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw Exception(try { JSONObject(text).getString("detail") } catch (_: Exception) { "Server error (${response.code})" })
+            if (!response.isSuccessful) {
+                if (response.code == 401 && token.isNotEmpty() && settings.token == token) settings.token = ""
+                throw Exception(errorDetail(text, response.code))
+            }
             text
         }
-    }
+    private fun errorDetail(text: String, status: Int): String =
+        runCatching { JSONObject(text).getString("detail") }.getOrDefault("Server error ($status)")
     suspend fun upload(uri: Uri): String = withContext(Dispatchers.IO) {
         val streamBody = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
             override fun writeTo(sink: BufferedSink) { context.contentResolver.openInputStream(uri)?.use { input -> input.copyTo(sink.outputStream()) } ?: error("Cannot read selected file") }
         }
         val body = MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("file", "media", streamBody).build()
-        val request = Request.Builder().url(settings.base + "/api/v1/uploads").header("Authorization", "Bearer ${settings.token}").post(body).build()
-        client.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) throw Exception(try { JSONObject(text).getString("detail") } catch (_: Exception) { "Upload failed (${response.code})" })
-            text
-        }
+        val token = settings.token
+        val request = Request.Builder().url(settings.base + "/api/v1/uploads").header("Authorization", "Bearer $token").post(body).build()
+        execute(request, token)
     }
 }

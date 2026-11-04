@@ -63,7 +63,9 @@ class OverlayTileService : TileService() {
 class TileLaunchActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Settings.canDrawOverlays(this)) {
+        if (tech.currenta.tldr.Settings(this).token.isEmpty()) {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        } else if (Settings.canDrawOverlays(this)) {
             try {
                 startForegroundService(Intent(this, OverlayService::class.java))
             } catch (_: IllegalStateException) {

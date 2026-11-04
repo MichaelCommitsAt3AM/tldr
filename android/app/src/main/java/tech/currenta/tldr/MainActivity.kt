@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -32,7 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -46,14 +44,24 @@ import java.util.Date
 class MainActivity : ComponentActivity() {
     private var incoming by mutableStateOf<String?>(null)
     private var incomingJob by mutableStateOf<String?>(null)
+    private var loginCode by mutableStateOf<String?>(null)
     private var incomingTab by mutableStateOf("Summary")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null) readIntent(intent)
-        setContent { TLDRApp(incoming, incomingJob, incomingTab, { incoming = null }, { incomingJob = null }) }
+        if (savedInstanceState == null || intent?.action == Intent.ACTION_VIEW) readIntent(intent)
+        setContent {
+            SignInGate(loginCode, { loginCode = null }) {
+                TLDRApp(incoming, incomingJob, incomingTab, { incoming = null }, { incomingJob = null })
+            }
+        }
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); readIntent(intent) }
     private fun readIntent(intent: Intent?) {
+        val callback = intent?.data
+        if (callback?.scheme == "tech.currenta.tldr" && callback.host == "auth" && callback.path == "/callback") {
+            loginCode = callback.getQueryParameter("code")
+            return
+        }
         incoming = intent?.getStringExtra(Intent.EXTRA_TEXT)
         incomingJob = intent?.getStringExtra("job_id")
         incomingTab = if (intent?.getStringExtra("result_tab") == "Check") "Check" else "Summary"
@@ -82,7 +90,6 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
     var busy by remember { mutableStateOf(false) }
     var showResultMenu by remember { mutableStateOf(false) }
     var showTranscript by rememberSaveable { mutableStateOf(false) }
-    var connectionStatus by remember { mutableStateOf("") }
     var tileStatus by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
@@ -213,7 +220,6 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                         }
                         TextButton(onClick = { picker.launch("*/*") }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Upload file") }
                         Text("Or share a link or text to TL;DR from another app.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (settings.token.isBlank()) { HorizontalDivider(); Text("Pair this device to start creating summaries."); OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { parentPage = "home"; page = "settings" }) { Text("Set up connection") } }
                     }
                     "library" -> {
                         val filtered = history.filter { it.jobTitle().contains(query, true) || it.string("url").contains(query, true) }
@@ -238,8 +244,6 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                         }
                     }
                     "settings" -> Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        var base by remember { mutableStateOf(settings.base) }; var code by remember { mutableStateOf("") }
-                        var connectionExpanded by remember { mutableStateOf(settings.token.isBlank()) }
                         Text("Preferences", style = MaterialTheme.typography.titleLarge)
                         
                         Spacer(Modifier.height(12.dp))
@@ -264,27 +268,10 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                         if (tileStatus.isNotEmpty()) Text(tileStatus, style = MaterialTheme.typography.bodySmall)
                         Text("After granting permission, return and tap Show shortcut. You can also toggle it from Quick Settings.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(8.dp)); HorizontalDivider()
-                        Row(Modifier.fillMaxWidth().clickable { connectionExpanded = !connectionExpanded }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("Connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
-                                Spacer(Modifier.height(3.dp))
-                                Text(if (settings.token.isNotBlank()) "Device paired" else "Set up your device", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            Icon(if (connectionExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (connectionExpanded) "Hide connection settings" else "Show connection settings")
-                        }
-                        if (connectionExpanded) {
-                            OutlinedTextField(base, { base = it }, label = { Text("Backend HTTPS URL") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = MaterialTheme.shapes.small)
-                            Text("Generate a pairing code on your server. It expires after five minutes.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            OutlinedTextField(code, { code = it.filter(Char::isDigit).take(9) }, label = { Text("9-digit pairing code") }, modifier = Modifier.fillMaxWidth(), singleLine = true, shape = MaterialTheme.shapes.small, keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword), visualTransformation = PasswordVisualTransformation())
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(shape = MaterialTheme.shapes.small, onClick = { scope.launch {
-                                    try { settings.base = base; val result = JSONObject(api.call("/pair", "POST", JSONObject().put("code", code))); settings.token = result.getString("token"); code = ""; connectionStatus = "Paired and connected"; error = ""; refresh() }
-                                    catch (e: Exception) { error = e.message ?: "Pairing failed" }
-                                } }, enabled = code.length == 9) { Text("Pair device") }
-                                OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { scope.launch { connectionStatus = "Checking…"; connectionStatus = try { settings.base = base.trim(); api.call("/jobs"); "Connected" } catch (e: Exception) { e.message ?: "Connection failed" } } }) { Text("Test connection") }
-                            }
-                            if (connectionStatus.isNotEmpty()) Text(connectionStatus, style = MaterialTheme.typography.bodySmall)
-                        }
+                        OutlinedButton(onClick = {
+                            context.stopService(Intent(context, OverlayService::class.java))
+                            settings.token = ""
+                        }) { Text("Sign out") }
                         HorizontalDivider(); Spacer(Modifier.height(6.dp)); Text("History", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                         var confirmClear by remember { mutableStateOf(false) }
                         if (!confirmClear) OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { confirmClear = true }) { Text("Clear completed history") }

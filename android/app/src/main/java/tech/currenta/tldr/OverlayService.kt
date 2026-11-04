@@ -34,7 +34,13 @@ class OverlayService : Service() {
     private lateinit var root: LinearLayout
     private lateinit var params: WindowManager.LayoutParams
     private val preferences by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
-    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key -> if (key == "theme") render() }
+    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "theme") render()
+        if (key == "access_session" && Settings(this).token.isEmpty()) {
+            needsSignIn = true
+            render()
+        }
+    }
     private var dismissTarget: TextView? = null
     private var expanded = false
     private var currentJob: String? = null
@@ -46,6 +52,7 @@ class OverlayService : Service() {
     private var processing = false
     private var checking = false
     private var cancelling = false
+    private var needsSignIn = false
     private var summaryReady = false
     private var completionPulse: ObjectAnimator? = null
     private var resultTab = "Summary"
@@ -200,6 +207,10 @@ class OverlayService : Service() {
         root.addView(scroll)
         if (error.isNotBlank()) add(content, label(error, 13f))
         when {
+            needsSignIn -> add(content, action("Sign in to TLDR", true) {
+                startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                stopSelf()
+            })
             processing -> {
                 add(content, label(status, bold = true)); progress(content)
                 add(content, label("You can minimize this and continue browsing.", 12f, true))

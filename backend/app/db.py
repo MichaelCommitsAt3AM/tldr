@@ -30,19 +30,28 @@ def initialize():
           error TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0, timings TEXT
         );
         CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created_at);
-        CREATE TABLE IF NOT EXISTS pairing (
-          id INTEGER PRIMARY KEY CHECK (id=1), code_hash TEXT NOT NULL,
-          expires_at REAL NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS accounts (
+          id TEXT PRIMARY KEY, email TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS login_codes (
+          code_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL,
+          token TEXT NOT NULL, expires_at INTEGER NOT NULL
         );
         """)
+        if "owner_id" not in {row["name"] for row in c.execute("PRAGMA table_info(jobs)")}:
+            c.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS jobs_owner ON jobs(owner_id, created_at)")
         # A killed worker cannot know whether its previous subprocess completed.
         c.execute("UPDATE jobs SET status='queued', updated_at=CURRENT_TIMESTAMP WHERE status IN ('fetching_metadata','downloading','extracting_audio','transcribing','summarizing') AND cancel_requested=0")
         c.execute("UPDATE jobs SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE cancel_requested=1 AND status NOT IN ('completed','failed','cancelled')")
 
 
-def get(job_id):
+def get(job_id, owner_id=None):
     with connection() as c:
-        row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if owner_id is None:
+            row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        else:
+            row = c.execute("SELECT * FROM jobs WHERE id=? AND owner_id=?", (job_id, owner_id)).fetchone()
     if not row:
         return None
     value = dict(row)
@@ -50,6 +59,7 @@ def get(job_id):
         if value[key]:
             value[key] = json.loads(value[key])
     value.pop("upload_path", None)
+    value.pop("owner_id", None)
     return value
 
 
