@@ -9,6 +9,7 @@ import time
 from . import db
 from .llm import LLM, ProviderError
 from .transcription import transcribe
+from .video_urls import validate_url
 
 MAX_BYTES = int(os.getenv("TLDR_MAX_BYTES", str(150 * 1024 * 1024)))
 MAX_SECONDS = int(os.getenv("TLDR_MAX_DURATION", "1800"))
@@ -46,14 +47,37 @@ def command(args, job_id, timeout=600):
             raise RuntimeError("This video is private or requires sign-in. Upload an authorized file instead.")
         if "geo-restricted" in detail or "not available in your country" in detail:
             raise RuntimeError("This video is not available in the server's region.")
+        if args[0] == "yt-dlp":
+            unavailable = (
+                "http error 404", "http error 410", "post not found", "tweet not found",
+                "has been deleted", "no longer available", "video unavailable", "this tweet is unavailable",
+            )
+            if any(marker in detail for marker in unavailable):
+                raise RuntimeError("The original post or video is no longer available. Upload a copy if you have one.")
+            raise RuntimeError("The original video could not be retrieved. It may be unavailable or restricted. Upload a copy if you have one.")
         raise RuntimeError("Media could not be retrieved or decoded. It may be private, unavailable, restricted, or unsupported.")
     return out
+
+
+def summarize_source(job_id, transcript, timings, started):
+    if cancelled(job_id):
+        raise Cancelled()
+    db.update(job_id, status="summarizing", transcript=transcript)
+    tick = time.monotonic()
+    summary = LLM().summarize_long(transcript["text"], job_id).model_dump()
+    timings["llm"] = time.monotonic() - tick
+    timings["total"] = time.monotonic() - started
+    if cancelled(job_id):
+        raise Cancelled()
+    db.update(job_id, status="completed", summary=summary, timings=timings)
 
 
 def run_job(job):
     job_id = job["id"]
     started = time.monotonic()
     timings = {}
+    if job["url"]:
+        validate_url(job["url"])
     if job["transcript"]:
         transcript = json.loads(job["transcript"])
         db.update(job_id, status="summarizing", error=None)
@@ -85,7 +109,7 @@ def run_job(job):
                 metadata = {k: info.get(k) for k in ("id", "title", "uploader", "duration", "thumbnail", "webpage_url", "extractor")}
                 db.update(job_id, status="downloading", metadata=metadata)
                 tick = time.monotonic()
-                command(base + ["-f", "bestaudio/best", "-o", os.path.join(temp, "input.%(ext)s"), "--", job["url"]], job_id)
+                command(base + ["--concurrent-fragments", "4", "-f", "bestaudio/best", "-o", os.path.join(temp, "input.%(ext)s"), "--", job["url"]], job_id)
                 timings["download"] = time.monotonic() - tick
                 files = [os.path.join(temp, f) for f in os.listdir(temp) if f.startswith("input.") and not f.endswith(".part")]
                 if len(files) != 1 or os.path.getsize(files[0]) > MAX_BYTES:
@@ -107,16 +131,7 @@ def run_job(job):
         tick = time.monotonic()
         transcript = transcribe(audio)
         timings["transcription"] = time.monotonic() - tick
-        if cancelled(job_id):
-            raise Cancelled()
-        db.update(job_id, status="summarizing", transcript=transcript)
-        tick = time.monotonic()
-        summary = LLM().summarize_long(transcript["text"], job_id).model_dump()
-        timings["llm"] = time.monotonic() - tick
-        timings["total"] = time.monotonic() - started
-        if cancelled(job_id):
-            raise Cancelled()
-        db.update(job_id, status="completed", summary=summary, timings=timings)
+        summarize_source(job_id, transcript, timings, started)
     if job["upload_path"]:
         os.unlink(job["upload_path"])
 

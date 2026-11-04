@@ -82,6 +82,15 @@ internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNu
 internal fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull { optString(it).takeIf(String::isNotBlank) }
 internal fun JSONObject.jobTitle(): String = optJSONObject("summary")?.string("title")?.takeIf(String::isNotBlank)
     ?: optJSONObject("metadata")?.string("title")?.takeIf(String::isNotBlank) ?: "Video summary"
+internal fun JSONObject.sourceLabel(): String {
+    val metadata = optJSONObject("metadata")
+    return when {
+        metadata?.string("platform") == "text" -> "pasted text"
+        metadata?.string("source_kind") == "post" -> "post text"
+        metadata?.string("source_kind") == "post_video" -> "post and transcript"
+        else -> "transcript"
+    }
+}
 internal val terminalStatuses = setOf("completed", "failed", "cancelled")
 internal fun statusLabel(status: String): String = when (status) {
     "queued" -> "Waiting in queue"; "fetching_metadata" -> "Finding video"; "downloading" -> "Downloading audio"

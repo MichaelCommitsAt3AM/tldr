@@ -1,5 +1,9 @@
 import json
 import threading
+from types import SimpleNamespace
+
+import pytest
+
 from app import db, worker
 
 
@@ -28,3 +32,10 @@ def test_worker_completes_uploaded_job(tmp_path, monkeypatch):
     assert result["transcript"]["text"] == "Hello"
     assert result["summary"]["title"] == "Hello"
     assert not media.exists()
+
+
+def test_missing_source_post_has_actionable_error(monkeypatch):
+    process = SimpleNamespace(returncode=1, communicate=lambda **_: (b"", b"HTTP Error 404: Not Found"))
+    monkeypatch.setattr(worker.subprocess, "Popen", lambda *args, **kwargs: process)
+    with pytest.raises(RuntimeError, match="original post or video is no longer available"):
+        worker.command(["yt-dlp", "https://x.com/example/status/123"], "job")

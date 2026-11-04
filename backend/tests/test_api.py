@@ -33,6 +33,41 @@ def test_auth_and_cache_and_cancel(client):
     assert client.get(f"/api/v1/jobs/{job['id']}", headers=headers).status_code == 404
 
 
+def test_submit_input_preserves_prose_and_rejects_unsupported_links(client):
+    headers = {"Authorization": "Bearer test-secret"}
+    text = "The report cites https://example.com for its estimates.\nIt discusses next steps."
+    pasted = client.post("/api/v1/jobs", json={"input": text}, headers=headers)
+    assert pasted.status_code == 200
+    assert pasted.json()["url"] is None
+    assert pasted.json()["transcript"] == {"text": text, "segments": []}
+
+    link = client.post("/api/v1/jobs", json={"input": "https://redd.it/abc123"}, headers=headers)
+    assert link.status_code == 422
+
+    with db.connection() as c:
+        c.execute("INSERT INTO jobs(id,url,status) VALUES('old-post','https://www.reddit.com/comments/abc123/','failed')")
+    assert client.post("/api/v1/jobs/old-post/retry", headers=headers).status_code == 422
+    assert db.get("old-post")["status"] == "failed"
+
+
+def test_retry_completed_link_creates_fresh_job_and_keeps_original(client):
+    headers = {"Authorization": "Bearer test-secret"}
+    url = "https://youtu.be/example"
+    original = client.post("/api/v1/jobs", json={"url": url}, headers=headers).json()
+    db.update(original["id"], status="completed", transcript={"text": "Old transcript"})
+    retry_url = f"/api/v1/jobs/{original['id']}/retry"
+
+    response = client.post(retry_url, headers=headers)
+    assert response.status_code == 200
+    retried = response.json()
+    assert retried["id"] != original["id"]
+    assert retried["url"] == url
+    assert retried["status"] == "queued"
+    assert retried["transcript"] is None
+    assert db.get(original["id"])["transcript"] == {"text": "Old transcript"}
+    assert client.post(retry_url, headers=headers).json()["id"] == retried["id"]
+
+
 def test_recovery_preserves_terminal_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB", str(tmp_path / "test.sqlite3"))
     db.initialize()

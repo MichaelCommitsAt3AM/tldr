@@ -99,11 +99,19 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
         current = job; savedJobId = job.string("id")
         showTranscript = false; error = ""; selectedTab = tab; page = "result"
     }
-    fun analyze(text: String) { scope.launch {
+    fun analyze(text: String, shared: Boolean = false) { scope.launch {
         busy = true; error = ""
-        try { open(JSONObject(api.call("/jobs", "POST", JSONObject().put("url", text.trim())))); refresh() }
+        val field = if (shared && Regex("https?://", RegexOption.IGNORE_CASE).containsMatchIn(text)) "url" else "input"
+        try { open(JSONObject(api.call("/jobs", "POST", JSONObject().put(field, text.trim())))); refresh() }
         catch (e: CancellationException) { throw e }
         catch (e: Exception) { error = e.message ?: "Could not create summary" }
+        finally { busy = false }
+    } }
+    fun retryAnalysis(id: String) { scope.launch {
+        busy = true; error = ""
+        try { open(JSONObject(api.call("/jobs/$id/retry", "POST"))); refresh() }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { error = e.message ?: "Could not retry analysis" }
         finally { busy = false }
     } }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -118,7 +126,7 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
     LaunchedEffect(page) {
         if (page == "library") { while (true) { loadHistory(); delay(5000) } }
     }
-    LaunchedEffect(incoming) { if (!incoming.isNullOrBlank()) { url = incoming; clearIncoming(); analyze(incoming) } }
+    LaunchedEffect(incoming) { if (!incoming.isNullOrBlank()) { url = incoming; clearIncoming(); analyze(incoming, shared = true) } }
     LaunchedEffect(incomingJob) {
         if (!incomingJob.isNullOrBlank()) {
             val id = incomingJob; val tab = incomingTab
@@ -158,7 +166,17 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                             Box {
                                 IconButton(onClick = { showResultMenu = true }) { Icon(Icons.Default.MoreVert, "More options") }
                                 DropdownMenu(expanded = showResultMenu, onDismissRequest = { showResultMenu = false }) {
-                                    DropdownMenuItem(text = { Text("View transcript") }, leadingIcon = { Icon(Icons.Default.Description, null) }, onClick = { showResultMenu = false; showTranscript = true })
+                                    DropdownMenuItem(text = { Text("View ${current?.sourceLabel() ?: "transcript"}") }, leadingIcon = { Icon(Icons.Default.Description, null) }, onClick = { showResultMenu = false; showTranscript = true })
+                                    DropdownMenuItem(
+                                        text = { Text("Retry") },
+                                        leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                                        enabled = !busy && currentId != null,
+                                        onClick = {
+                                            showResultMenu = false
+                                            if (current?.string("url").isNullOrBlank() && current?.optJSONObject("metadata")?.string("platform") != "text") picker.launch("*/*")
+                                            else currentId?.let { retryAnalysis(it) }
+                                        },
+                                    )
                                     DropdownMenuItem(text = { Text("Delete analysis") }, leadingIcon = { Icon(Icons.Default.DeleteOutline, null) }, onClick = { showResultMenu = false; confirmDelete = true })
                                     DropdownMenuItem(text = { Text("Settings") }, leadingIcon = { Icon(Icons.Default.Tune, null) }, onClick = { showResultMenu = false; page = "settings" })
                                 }
@@ -186,15 +204,15 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                 when (page) {
                     "home" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         Text("New summary", style = MaterialTheme.typography.headlineSmall)
-                        OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Video link") }, placeholder = { Text("Paste a video URL") }, maxLines = 3, trailingIcon = {
-                            IconButton(onClick = { url = context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty() }) { Icon(Icons.Default.ContentPaste, "Paste link") }
+                        OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Link or text") }, placeholder = { Text("Paste a link or text to summarize") }, maxLines = 5, trailingIcon = {
+                            IconButton(onClick = { url = context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty() }) { Icon(Icons.Default.ContentPaste, "Paste") }
                         })
                         Button(shape = MaterialTheme.shapes.small, onClick = { analyze(url) }, enabled = url.isNotBlank() && !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                             if (busy) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)) }
                             Text(if (busy) "Submitting…" else "Summarize")
                         }
                         TextButton(onClick = { picker.launch("*/*") }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.AttachFile, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Upload file") }
-                        Text("Or share a video to TL;DR from another app.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Or share a link or text to TL;DR from another app.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (settings.token.isBlank()) { HorizontalDivider(); Text("Pair this device to start creating summaries."); OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { parentPage = "home"; page = "settings" }) { Text("Set up connection") } }
                     }
                     "library" -> {
@@ -296,7 +314,7 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
                                     if (item.optInt("cancel_requested") == 1) Text("Stopping when the current operation can be interrupted.", style = MaterialTheme.typography.bodySmall)
                                 } else {
                                     Text(item.string("error").ifBlank { if (status == "cancelled") "Analysis cancelled." else "Analysis failed." })
-                                    Button(shape = MaterialTheme.shapes.small, onClick = { scope.launch { try { open(JSONObject(api.call("/jobs/$currentId/retry", "POST"))); refresh() } catch (e: Exception) { error = e.message.orEmpty() } } }) { Text("Retry") }
+                                    Button(shape = MaterialTheme.shapes.small, enabled = !busy && currentId != null, onClick = { currentId?.let { retryAnalysis(it) } }) { Text("Retry") }
                                     TextButton(onClick = { confirmDelete = true }) { Text("Delete analysis") }
                                 }
                             }
@@ -308,11 +326,11 @@ fun TLDRApp(incoming: String?, incomingJob: String?, incomingTab: String, clearI
         if (showTranscript && current?.string("status") == "completed") ModalBottomSheet(onDismissRequest = { showTranscript = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).padding(horizontal = 22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Transcript", style = MaterialTheme.typography.titleLarge)
-                    IconButton(onClick = { showTranscript = false }) { Icon(Icons.Default.Close, "Close transcript") }
+                    Text(current?.sourceLabel()?.replaceFirstChar { it.uppercase() } ?: "Transcript", style = MaterialTheme.typography.titleLarge)
+                    IconButton(onClick = { showTranscript = false }) { Icon(Icons.Default.Close, "Close source") }
                 }
                 SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-                    Text(current?.optJSONObject("transcript")?.string("text").orEmpty().ifBlank { "No transcript available." }, style = MaterialTheme.typography.bodyLarge)
+                    Text(current?.optJSONObject("transcript")?.string("text").orEmpty().ifBlank { "No source text available." }, style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }

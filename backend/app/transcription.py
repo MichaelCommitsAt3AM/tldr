@@ -9,7 +9,7 @@ _lock = Lock()
 @lru_cache(maxsize=1)
 def model():
     from faster_whisper import WhisperModel
-    return WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=2, num_workers=1)
+    return WhisperModel("base.en", device="cpu", compute_type="int8", cpu_threads=2, num_workers=1)
 
 
 def transcribe(path: str) -> dict:

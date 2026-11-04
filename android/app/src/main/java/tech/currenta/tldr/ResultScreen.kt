@@ -110,7 +110,13 @@ internal fun CompletedResult(
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).padding(22.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
             Text(jobMetadata(job), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(job.jobTitle(), style = MaterialTheme.typography.headlineSmall)
-            if (selectedTab == "Summary") Text("Based on the video transcript", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (selectedTab == "Summary") {
+                val source = job.sourceLabel().let { if (it == "transcript") "video transcript" else it }
+                Text("Based on the $source", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                job.optJSONObject("metadata")?.string("video_note")?.takeIf(String::isNotBlank)?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             val tabs = listOf("Summary", "Check")
             PrimaryTabRow(selectedTabIndex = tabs.indexOf(selectedTab).coerceAtLeast(0), containerColor = MaterialTheme.colorScheme.surface) {
                 tabs.forEach { tab -> Tab(selected = selectedTab == tab, onClick = { onSelectTab(tab) }, text = { Text(tab, style = MaterialTheme.typography.titleMedium) }) }
@@ -119,7 +125,8 @@ internal fun CompletedResult(
                 val summary = job.optJSONObject("summary")
                 val noClaims = summary?.optJSONArray("important_claims")?.length() == 0
                 if (report == null && noClaims) {
-                    Text("No factual claims to check were identified in this video.", style = MaterialTheme.typography.bodyLarge)
+                    val message = if (job.sourceLabel() == "transcript") "No factual claims to check were identified in this video." else "No factual claims to check were identified."
+                    Text(message, style = MaterialTheme.typography.bodyLarge)
                     Text("You can read the summary or ask a question below.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                 if (report == null) Text("Compare claims with external sources.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -146,7 +153,9 @@ internal fun CompletedResult(
                         scope.launch { snackbar.showSnackbar("Summary copied") }
                     }) { Icon(Icons.Outlined.ContentCopy, "Copy summary") }
                     IconButton(onClick = { context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share summary")) }) { Icon(Icons.Outlined.Share, "Share summary") }
-                    if (job.string("url").isNotBlank()) IconButton(onClick = { openSource(context, job.string("url")) }) { Icon(Icons.AutoMirrored.Outlined.OpenInNew, "Open original video") }
+                    if (job.string("url").isNotBlank()) IconButton(onClick = { openSource(context, job.string("url")) }) {
+                        Icon(Icons.AutoMirrored.Outlined.OpenInNew, if (job.sourceLabel() == "transcript") "Open original video" else "Open original post")
+                    }
                 }
             }
             if (turns.isNotEmpty()) {
@@ -184,7 +193,10 @@ internal fun CompletedResult(
                 IconButton(onClick = { claimContext = "" }) { Icon(Icons.Outlined.Close, "Clear claim context") }
             }
             TextField(draft, { draft = it.take(1000) }, modifier = Modifier.fillMaxWidth().focusRequester(composerFocus),
-                placeholder = { Text(if (claimContext.isBlank()) "Ask about this video" else "Ask about this claim", style = MaterialTheme.typography.bodyMedium) },
+                placeholder = {
+                    val subject = if (job.sourceLabel() == "transcript") "video" else "summary"
+                    Text(if (claimContext.isBlank()) "Ask about this $subject" else "Ask about this claim", style = MaterialTheme.typography.bodyMedium)
+                },
                 supportingText = if (draft.length > 900) { { Text("${draft.length}/1000") } } else null,
                 maxLines = 4, keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { send() }),

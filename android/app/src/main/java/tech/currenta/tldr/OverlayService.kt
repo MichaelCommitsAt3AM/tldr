@@ -1,5 +1,7 @@
 package tech.currenta.tldr
 
+import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -44,6 +46,8 @@ class OverlayService : Service() {
     private var processing = false
     private var checking = false
     private var cancelling = false
+    private var summaryReady = false
+    private var completionPulse: ObjectAnimator? = null
     private var resultTab = "Summary"
     private val expandedClaims = mutableSetOf<Int>()
     private var task: Job? = null
@@ -97,6 +101,7 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) { super.onConfigurationChanged(newConfig); if (::root.isInitialized) render() }
     private fun setExpanded(value: Boolean) {
         expanded = value
+        if (value) summaryReady = false
         params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or (if (value) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         render()
     }
@@ -139,15 +144,42 @@ class OverlayService : Service() {
         }
         view.setOnClickListener { setExpanded(!expanded) }
     }
-    private fun render() {
+    private fun render() = render(pulse = false)
+
+    private fun render(pulse: Boolean) {
         if (!::root.isInitialized) return
+        completionPulse?.cancel()
+        completionPulse = null
+        root.scaleX = 1f
+        root.scaleY = 1f
         val oldScroll = root.findViewWithTag<ScrollView>("content")?.scrollY ?: 0
         root.removeAllViews()
         if (!expanded) {
             root.setPadding(0, 0, 0, 0); root.background = shape(palette.primary, 40); params.width = dp(52)
-            val bubble = ImageView(this).apply { setImageResource(R.drawable.ic_quick_tile); setColorFilter(palette.onPrimary); setPadding(dp(13), dp(13), dp(13), dp(13)); contentDescription = if (checking) "TLDR: checking claims" else if (processing) "TLDR: processing video" else "Open or drag TLDR" }
+            val bubble = ImageView(this).apply {
+                setImageResource(R.drawable.ic_quick_tile)
+                setColorFilter(palette.onPrimary)
+                setPadding(dp(13), dp(13), dp(13), dp(13))
+                contentDescription = when {
+                    checking -> "TLDR: checking claims"
+                    processing -> "TLDR: processing"
+                    summaryReady -> "TLDR: summary ready. Tap to open."
+                    else -> "Open or drag TLDR"
+                }
+            }
             root.addView(bubble, LinearLayout.LayoutParams(dp(52), dp(52))); draggable(bubble)
-            clampAndUpdate(); return
+            clampAndUpdate()
+            if (pulse) {
+                completionPulse = ObjectAnimator.ofPropertyValuesHolder(
+                    root,
+                    PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, .78f, 1f, .78f, 1f),
+                    PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, .78f, 1f, .78f, 1f),
+                ).apply {
+                    duration = 1100L
+                    start()
+                }
+            }
+            return
         }
         params.width = min(dp(360), resources.displayMetrics.widthPixels - dp(24))
         root.background = shape(palette.paper, 12, palette.rule); root.setPadding(dp(16), dp(8), dp(16), dp(16))
@@ -191,19 +223,20 @@ class OverlayService : Service() {
     }
     private fun progress(container: LinearLayout) { add(container, ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true; indeterminateTintList = ColorStateList.valueOf(palette.primary) }) }
     private fun renderInput(container: LinearLayout) {
-        add(container, label("Video link", 12f, true))
+        add(container, label("Link or text", 12f, true))
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; background = shape(palette.paper, 8, palette.muted) }
         val input = EditText(this).apply {
-            hint = "Paste a video URL"; setSingleLine(); textSize = 16f; setTextColor(palette.ink); setHintTextColor(palette.muted)
+            hint = "Paste a link or text"; textSize = 16f; setTextColor(palette.ink); setHintTextColor(palette.muted)
             background = null; setPadding(dp(12), dp(8), dp(4), dp(8)); setText(link)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            minLines = 2; maxLines = 5
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { link = s.toString() }
                 override fun afterTextChanged(s: android.text.Editable?) {}
             })
         }
-        row.addView(input, LinearLayout.LayoutParams(0, dp(52), 1f))
+        row.addView(input, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(action("Paste") { input.setText(getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()) })
         add(container, row, 6); add(container, action("Summarize", true) { analyze() })
     }
@@ -226,7 +259,7 @@ class OverlayService : Service() {
                 val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, summaryText)
                 startActivity(Intent.createChooser(send, "Share summary").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); setExpanded(false)
             }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4) })
-            if (job?.string("url")?.isNotBlank() == true) actions.addView(iconAction(R.drawable.ic_external_link, "Open original video") {
+            if (job?.string("url")?.isNotBlank() == true) actions.addView(iconAction(R.drawable.ic_external_link, "Open original source") {
                 openSource(this, job?.string("url").orEmpty()); setExpanded(false)
             }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4) })
             add(container, actions); add(container, action("Open summary") { openFull("Summary") })
@@ -239,7 +272,7 @@ class OverlayService : Service() {
         val fact = report
         if (fact == null) {
             if (job?.optJSONObject("summary")?.optJSONArray("important_claims")?.length() == 0) {
-                add(container, label("No factual claims to check were identified in this video."))
+                add(container, label("No factual claims to check were identified."))
                 add(container, action("Open summary") { openFull("Summary") })
                 return
             }
@@ -278,14 +311,15 @@ class OverlayService : Service() {
     private fun newSummary() { if (checking) return; job = null; currentJob = null; report = null; link = ""; error = ""; status = ""; resultTab = "Summary"; expandedClaims.clear(); render() }
     private fun analyze() {
         if (processing) return
-        if (link.isBlank()) { error = "Paste a video link first."; render(); return }
-        launchAnalysis { Api(this).call("/jobs", "POST", JSONObject().put("url", link.trim())) }
+        if (link.isBlank()) { error = "Paste a link or text first."; render(); return }
+        launchAnalysis { Api(this).call("/jobs", "POST", JSONObject().put("input", link.trim())) }
     }
     private fun retryAnalysis() {
         val id = currentJob ?: return
         launchAnalysis { if (job?.string("status") in terminalStatuses) Api(this).call("/jobs/$id/retry", "POST") else Api(this).call("/jobs/$id") }
     }
     private fun launchAnalysis(create: suspend () -> String) {
+        summaryReady = false
         processing = true; cancelling = false; error = ""; status = "Starting analysis…"; report = null; expandedClaims.clear(); render()
         task = scope.launch {
             try {
@@ -297,9 +331,10 @@ class OverlayService : Service() {
                 report = job?.optJSONObject("fact_check")
                 status = job?.string("error").orEmpty().ifBlank { statusLabel(job?.string("status").orEmpty()) }
                 resultTab = "Summary"
+                summaryReady = !expanded && job?.string("status") == "completed"
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { error = e.message ?: "Connection failed. Try again." }
-            finally { processing = false; if (expanded) render() }
+            finally { processing = false; if (scope.isActive) render(pulse = summaryReady) }
         }
     }
     private fun cancelAnalysis() {
@@ -325,6 +360,7 @@ class OverlayService : Service() {
         }
     }
     override fun onDestroy() {
+        completionPulse?.cancel()
         scope.cancel(); preferences.unregisterOnSharedPreferenceChangeListener(preferenceListener)
         if (::manager.isInitialized) { hideTarget(); if (::root.isInitialized) manager.removeView(root) }
         isRunning = false; OverlayTileService.refresh(this); super.onDestroy()
